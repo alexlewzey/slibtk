@@ -19,6 +19,9 @@ setup(
     },
     install_requires=[
         'pyperclip',
+        'psutil',
+        'dateutil',
+        'tqdm',
     ],
     license="BSD license",
     keywords='slibtk',
