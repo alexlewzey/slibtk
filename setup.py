@@ -20,7 +20,7 @@ setup(
     install_requires=[
         'pyperclip',
         'psutil',
-        'dateutil',
+        'python-dateutil',
         'tqdm',
     ],
     license="BSD license",
