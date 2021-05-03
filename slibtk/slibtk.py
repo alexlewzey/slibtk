@@ -24,6 +24,13 @@ from dateutil.relativedelta import relativedelta
 from tqdm import tqdm
 
 from slibtk.core import *
+import smtplib
+import os
+from email.message import EmailMessage
+import sys
+import traceback
+from pathlib import Path
+import statistics
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +123,52 @@ def timer(func):
     return wrapper
 
 
+def runtimes(arg_values: Sequence):
+    """decorator that records the runtime (seconds) for several values of a single
+    argument that is passed to the decorated func, returning the argument: second
+    pairs in a dictionary"""
+
+    def outer_wrapper(func: Callable):
+        @functools.wraps(func)
+        def inner_wrapper(*args, **kwargs):
+            logger.info(f'monitoring runtimes for func={func.__name__}, values={arg_values}')
+            times = {}
+            for value in arg_values:
+                start = time.time()
+                func(value, *args, **kwargs)
+                seconds = time.time() - start
+                times[value] = seconds
+                logger.info(f'param={value} seconds={seconds}')
+
+            return times
+
+        return inner_wrapper
+
+    return outer_wrapper
+
+
+def average_timer(n_runs: int):
+    """decorator that logs the average time taken for `n_runs` of the decorated"""
+
+    def outer_wrapper(func: Callable):
+        @functools.wraps(func)
+        def inner_wrapper(*args, **kwargs):
+            times = []
+            for _ in range(n_runs):
+                start = time.time()
+                func(*args, **kwargs)
+                times.append(time.time() - start)
+
+            mil = 1_000_000
+            print(
+                f'n_runs: {n_runs}, average time taken: {statistics.mean(times) * mil:.3f}us, min: {min(times) * mil:.3f}us')
+            return func(*args, **kwargs)
+
+        return inner_wrapper
+
+    return outer_wrapper
+
+
 class RunTimes:
     """
     stores run-times of methods in the programme and can display totals
@@ -154,7 +207,8 @@ class RunTimes:
         return outer_wrapper
 
 
-def with_cache(path: PathOrStr, use_cache: bool = True) -> Callable:
+
+def with_cache(path: PathOrStr, use_cache: bool = True, fname: Optional[str] = None) -> Callable:
     """
     decorator that will use a pickled version of a functions return if it exists when the function called else it will
     execute the function as normal
@@ -172,14 +226,14 @@ def with_cache(path: PathOrStr, use_cache: bool = True) -> Callable:
     def _outer_wrapper(func):
         @functools.wraps(func)
         def _inner_wrapper(*args, **kwargs):
-            if path.exists() and use_cache:
-                cached = read_pickle(path)
+            if (path / f'{func.__name__}.pickle').exists() and use_cache:
+                cached = read_pickle((path / f'{func.__name__}.pickle'))
                 logger.info(f'loaded return from cache: {func.__name__}')
                 return cached
 
             result = func(*args, **kwargs)
-            write_pickle(result, path)
-            if not path.exists():
+            write_pickle(result, (path / f'{func.__name__}.pickle'))
+            if not (path / f'{func.__name__}.pickle').exists():
                 logger.info(f'no cache exists')
             logger.info(f'saved return to cache: {func.__name__}')
             return result
@@ -190,6 +244,17 @@ def with_cache(path: PathOrStr, use_cache: bool = True) -> Callable:
 
 
 # string tools #########################################################################################################
+
+def re_no_decimal_places(s: str):
+    return re.sub(r'(\d*)\.(\d*)', r'\1', s)
+
+
+def re_n_decimal_places(s: str, n: int = 0) -> str:
+    matches = re.findall(r'(\d+)(\.\d*)', s)
+    for match in matches:
+        s = s.replace(''.join(match), match[0] + match[1][:n + 1])
+    return s if n > 0 else re_no_decimal_places(s)
+
 
 def camel2snake(s: str) -> str:
     s = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', s)
@@ -205,6 +270,7 @@ def to_slug(s: str):
     """covert string to slug format
     before: Hello  world!!
     after: hello_world"""
+    s = str(s)
     s = re.sub('[^\w\s]+', '', s)
     return '_'.join(s.lower().split())
 
@@ -263,10 +329,43 @@ def grep_(pattern: str, text: str, window: int = 30) -> List[str]:
 
 # iterable tools #######################################################################################################
 
+def is_listy(x: Any) -> bool: return isinstance(x, (tuple, list))
+
+
+def listify(x: Any) -> List:
+    """Make `x` a list"""
+    if isinstance(x, str): x = [x]
+    if not isinstance(x, Iterable): x = [x]
+    return list(x)
+
+
+assert isinstance(listify(['hello', 'world']), list)
+assert isinstance(listify('hello world'), list)
+assert isinstance(listify(range(5)), list)
+
 
 def uniqueify(items: Iterable) -> List:
     """remove duplicates from iterable and preserve order"""
     return list(OrderedDict.fromkeys(items).keys())
+
+
+def recurse_sum(x):
+    """recursively sum floats and ints in any combination of nested lists and dicts"""
+    numbers = []
+
+    def cache_numbers(x: Any) -> None:
+        if isinstance(x, (float, int)): numbers.append(x)
+        return x
+
+    recurse(cache_numbers, x)
+    return sum(numbers)
+
+
+def recurse(func: Callable, x: Any, *args, **kwargs) -> Any:
+    """recursively apply func to any combination of nested lists and dicts"""
+    if isinstance(x, (list, tuple)): return [recurse(func, o, *args, **kwargs) for o in x]
+    if isinstance(x, dict): return {k: recurse(func, v, *args, **kwargs) for k, v in x.items()}
+    return func(x, *args, **kwargs)
 
 
 def wildcard_filter(items: Iterable, query: str) -> List[str]:
@@ -331,6 +430,11 @@ def dict_sample(d: Dict, n_samples: int = 5) -> Dict:
 
 # datetime tools #######################################################################################################
 
+def current_date_minute() -> str:
+    """return current date minute as a string e.g. '2021-02-02_0905'"""
+    return str(datetime.now().replace(microsecond=0)).replace(':', '').replace(' ', '_')[:-2]
+
+
 def make_tsub(n: int) -> Tuple[datetime.date, datetime.date]:
     """return start and end date of the the 365 day period prior to today with an n year lag"""
     assert n > 0, 'n must be positive'
@@ -369,7 +473,7 @@ def hr_secs_elapsed(start: float) -> str:
     return hr_secs(time.time() - start)
 
 
-# in outs ##############################################################################################################
+# io in outs ##############################################################################################################
 
 
 class FileTXT:
@@ -426,6 +530,10 @@ class LogTXT(FileTXT):
             lines = f.read().splitlines()
         return lines
 
+    def clear(self) -> None:
+        with self.path.open('w'):
+            pass
+
 
 class FileCSV:
     """simple csv file object"""
@@ -467,13 +575,19 @@ def date_versioned_dir(dst: Path) -> Path:
     return versioned_dir
 
 
-def next_fname(path: PathOrStr, fname: str, suffix: str) -> Path:
-    """return next incremental file that does not exist fname_{next_num}.suffix"""
+def next_fname(path: PathOrStr) -> Path:
+    """return next incremental file that does not exist (path.root)_{next_num}.(path.suffix)"""
     path = Path(path)
+    parent, stem, suffix = path.parent, path.stem, path.suffix
     i = 0
-    while (path / f'{fname}_{i:02}.{suffix}').exists():
+    while (parent / f'{stem}_{i:02}{suffix}').exists():
         i += 1
-    return path / f'{fname}_{i:02}.{suffix}'
+    return parent / f'{stem}_{i:02}{suffix}'
+
+
+def extend_path_name(path: OptPathOrStr, ext: str) -> Optional[Path]:
+    """concat string to the end of the path name but before the suffix"""
+    return path.parent / (f'{path.stem}_{ext}{path.suffix}') if path else None
 
 
 @log_input()
@@ -501,7 +615,7 @@ def write_json(obj, path: PathOrStr) -> None:
         json.dump(obj, f)
 
 
-def read_json(path: str) -> Union[List, Dict]:
+def read_json(path: PathOrStr) -> Union[List, Dict]:
     """return stored object from a json file"""
     path = Path(path)
     with path.open() as f:
@@ -681,14 +795,10 @@ def py_process_memory() -> str:
     return hr_bytes(process.memory_info().rss)
 
 
-
-
-
-
 # memory & runtime tools ###############################################################################################
 
 def show_vars(*args):
-    """Print an arbitrary number of variable names with their assigned value. Iterate over all global variables until 
+    """Print an arbitrary number of variable names with their assigned value. Iterate over all global variables until
     it finds ones with a matching memory reference."""
     pairs = {k: v for k, v in globals().items() if id(v) in map(id, args)}
     print(pairs)
@@ -701,6 +811,61 @@ def var_nm(var: Any) -> str:
 
 if __name__ == '__main__':
     pass
+
+
+# errors / tracebacks ##################################################################################################
+
+def make_error_log() -> str:
+    """if called once an exception has been raised This function returns a string error log (including type,
+    msg and traceback)"""
+    ex_type, ex_value, ex_traceback = sys.exc_info()
+    trace_back = traceback.extract_tb(ex_traceback)
+    stack_trace = [f"File : {tr[0]} , Line : {tr[1]}, Func.Name : {tr[2]}, Message : {tr[3]}" for tr in trace_back]
+    stack_trace = '\n\t'.join(stack_trace)
+    error_log: str = (f"Exception type: {ex_type.__name__}\n"
+                      f"Exception message: {ex_value}\n"
+                      f"Stack trace:\n\t {stack_trace}")
+    return error_log
+
+
+# emails ###############################################################################################################
+
+
+def send_email(to: str, subject: str, body: str) -> None:
+    """send a text email to a passed email address. the sender email address is sourced from an
+    environment variable"""
+    address = os.environ['EMAIL_ADDRESS']
+    msg = EmailMessage()
+    msg['From'] = address
+    msg['To'] = to
+    msg['Subject'] = subject
+    msg.set_content(body)
+    # msg.add_attachment(df.to_csv(index=False), filename='data.csv')
+    # add a text file attachment
+    with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+        smtp.login(address, os.environ['EMAIL_PASSWORD'])
+        smtp.send_message(msg)
+
+
+def send_error_log_email(to: str) -> None:
+    """
+    If an exception is raised send an error log message to param email
+
+    example
+    -------
+
+    try:
+        def app():
+            something
+
+        app()
+    except Exception as e:
+        error_log = montk.make_error_log()
+        montk.send_error_log_email(to=os.environ['EMAIL_ADDRESS'])
+    """
+    error_log = make_error_log()
+    send_email(to=to, subject=f'Error in app: {Path(__file__).name}', body=error_log)
+
 
 # monkey patching standard library classes #############################################################################
 
